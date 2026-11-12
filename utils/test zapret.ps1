@@ -19,7 +19,7 @@ function Get-IpsetStatus {
 function Wait-WinwsReady {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     while ($timer.ElapsedMilliseconds -lt 5000) {
-        if (Get-Process -Name "winws" -ErrorAction SilentlyContinue) {
+        if (Get-Process -Name "winws-engine" -ErrorAction SilentlyContinue) {
             Start-Sleep -Milliseconds 300
             return $true
         }
@@ -679,7 +679,8 @@ try {
     
     # Wait init
     if (-not (Wait-WinwsReady)) {
-        Write-Host "  > Strategy failed to start (winws process not found). Skipping..." -ForegroundColor Red
+        Write-Host "  > Strategy failed to start (winws-engine process not found). Skipping..." -ForegroundColor Red
+        Stop-Zapret
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
         continue
     }

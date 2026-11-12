@@ -80,21 +80,22 @@ echo      4. Game Filter         [!GameFilterStatus!]
 echo      5. IPSet Filter        [!IPsetStatus!]
 echo      6. Auto-Update Check   [!CheckUpdatesStatus!]
 echo      7. Replace active fakes
+echo      8. Network Interfaces
 echo.
 echo   :: UPDATES
-echo      8. Update IPSet List
-echo      9. Update Hosts File
-echo      10. Check for Updates
+echo      9. Update IPSet List
+echo      10. Update Hosts File
+echo      11. Check for Updates
 echo.
 echo   :: TOOLS
-echo      11. Run Diagnostics
-echo      12. Run Tests
+echo      12. Run Diagnostics
+echo      13. Run Tests
 echo.
 echo   ----------------------------------------
 echo      0. Exit
 echo.
 
-set /p menu_choice=   Select option (0-12): 
+set /p "menu_choice=   Select option (0-13): "
 
 if "%menu_choice%"=="1" goto service_install
 if "%menu_choice%"=="2" goto service_remove
@@ -103,12 +104,22 @@ if "%menu_choice%"=="4" goto game_switch
 if "%menu_choice%"=="5" goto ipset_switch
 if "%menu_choice%"=="6" goto check_updates_switch
 if "%menu_choice%"=="7" goto replace_active_fakes
-if "%menu_choice%"=="8" goto ipset_update
-if "%menu_choice%"=="9" goto hosts_update
-if "%menu_choice%"=="10" goto service_check_updates
-if "%menu_choice%"=="11" goto service_diagnostics
-if "%menu_choice%"=="12" goto run_tests
+if "%menu_choice%"=="8" goto network_interfaces
+if "%menu_choice%"=="9" goto ipset_update
+if "%menu_choice%"=="10" goto hosts_update
+if "%menu_choice%"=="11" goto service_check_updates
+if "%menu_choice%"=="12" goto service_diagnostics
+if "%menu_choice%"=="13" goto run_tests
 if "%menu_choice%"=="0" exit /b
+goto menu
+
+
+:: NETWORK INTERFACES ==================
+:network_interfaces
+cls
+chcp 65001 > nul
+"%~dp0bin\winws.exe" --zapret-interfaces
+pause
 goto menu
 
 
@@ -156,11 +167,11 @@ if not exist "%BIN_PATH%\*.sys" (
 )
 echo:
 
-tasklist /FI "IMAGENAME eq winws.exe" | find /I "winws.exe" > nul
+tasklist /FI "IMAGENAME eq winws-engine.exe" | find /I "winws-engine.exe" > nul
 if !errorlevel!==0 (
-    call :PrintGreen "Bypass (winws.exe) is RUNNING."
+    call :PrintGreen "Bypass (winws-engine.exe) is RUNNING."
 ) else (
-    call :PrintRed "Bypass (winws.exe) is NOT running."
+    call :PrintRed "Bypass (winws-engine.exe) is NOT running. Check Network Interfaces if binding is enabled."
 )
 
 pause
@@ -353,7 +364,11 @@ set SRVCNAME=zapret
 
 net stop %SRVCNAME% >nul 2>&1
 sc delete %SRVCNAME% >nul 2>&1
-sc create %SRVCNAME% binPath= "\"%BIN_PATH%winws.exe\" !ARGS!" DisplayName= "zapret" start= auto
+sc create %SRVCNAME% binPath= "\"%BIN_PATH%winws.exe\" --zapret-service !ARGS!" DisplayName= "zapret" start= auto
+if errorlevel 1 (
+    pause
+    goto menu
+)
 sc description %SRVCNAME% "Zapret DPI bypass software"
 sc start %SRVCNAME%
 for %%F in ("!file%choice%!") do (
