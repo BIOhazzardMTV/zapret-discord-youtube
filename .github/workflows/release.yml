@@ -8,14 +8,40 @@ on:
         required: true
 
 jobs:
+  build-launcher:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build launcher
+        shell: powershell
+        run: .\launcher\build.ps1
+
+      - name: Run Windows tests
+        shell: powershell
+        run: |
+          .\launcher\build.ps1 -Test
+          .\tests\Maintenance.Tests.ps1
+
+      - name: Upload built launcher
+        uses: actions/upload-artifact@v7
+        with:
+          name: winws-launcher
+          path: bin/winws.exe
+          if-no-files-found: error
+
   release:
+    needs: build-launcher
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Verify version matches version.txt
         run: |
@@ -24,6 +50,12 @@ jobs:
             echo "Error: tag '${{ github.event.inputs.tag }}' does not match .service/version.txt ('$VERSION')"
             exit 1
           fi
+
+      - name: Download tested launcher
+        uses: actions/download-artifact@v8
+        with:
+          name: winws-launcher
+          path: release-launcher
 
       - name: Install tools
         run: |
@@ -37,9 +69,11 @@ jobs:
           mkdir "$NAME"
 
           cp -r bin "$NAME/"
+          cp release-launcher/winws.exe "$NAME/bin/winws.exe"
           cp -r lists "$NAME/"
           cp -r utils "$NAME/"
           cp *.bat "$NAME/"
+          cp LICENSE.txt "$NAME/"
 
       - name: Create archives
         run: |
@@ -49,21 +83,24 @@ jobs:
           rar a -idq "${NAME}.rar" "$NAME"
           tar --owner=0 --group=0 -czf "${NAME}.tar.gz" "$NAME"
 
-      - name: Print SHA256 checksums
+      - name: Generate SHA256 checksums
         run: |
           NAME="zapret-discord-youtube-${{ github.event.inputs.tag }}"
 
           sha256sum \
             "${NAME}.zip" \
             "${NAME}.rar" \
-            "${NAME}.tar.gz"
+            "${NAME}.tar.gz" > "${NAME}-SHA256SUMS.txt"
+          cat "${NAME}-SHA256SUMS.txt"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag }}
           name: ${{ github.event.inputs.tag }}
+          fail_on_unmatched_files: true
           files: |
             zapret-discord-youtube-${{ github.event.inputs.tag }}.zip
             zapret-discord-youtube-${{ github.event.inputs.tag }}.rar
             zapret-discord-youtube-${{ github.event.inputs.tag }}.tar.gz
+            zapret-discord-youtube-${{ github.event.inputs.tag }}-SHA256SUMS.txt

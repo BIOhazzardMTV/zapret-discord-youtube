@@ -1,7 +1,12 @@
 /utils/test results
 /utils/game_filter.enabled
+/utils/game_filter.enabled.lock
+/utils/game_filter.enabled.*.tmp
+/lists/ipset-all.txt.*.tmp
 /utils/network_interfaces.json
 /utils/network_interfaces.json.*.tmp
+/ipset_switched.flag*
+/lists/ipset-all.test-backup.txt*
 /lists/ipset-exclude-user.txt
 /lists/list-general-user.txt
 /lists/list-exclude-user.txt

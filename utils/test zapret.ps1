@@ -3,6 +3,7 @@ $hasErrors = $false
 $rootDir = Split-Path $PSScriptRoot
 $listsDir = Join-Path $rootDir "lists"
 $utilsDir = Join-Path $rootDir "utils"
+$ipsetFlagFile = Join-Path $rootDir "ipset_switched.flag"
 $resultsDir = Join-Path $utilsDir "test results"
 if (-not (Test-Path $resultsDir)) { New-Item -ItemType Directory -Path $resultsDir | Out-Null }
 
@@ -29,23 +30,46 @@ function Wait-WinwsReady {
 }
 
 function Set-IpsetMode {
-    param([string]$mode)
+    param([ValidateSet('any', 'restore')][string]$mode)
+    $ErrorActionPreference = 'Stop'
     $listFile = Join-Path $listsDir "ipset-all.txt"
     $backupFile = Join-Path $listsDir "ipset-all.test-backup.txt"
-    if ($mode -eq "any") {
-        # Always backup current file (even if none)
-        if (Test-Path $listFile) {
-            Copy-Item $listFile $backupFile -Force
+    $stagedList = "$backupFile.tmp"
+    $stagedFlag = "$ipsetFlagFile.tmp"
+    if ($mode -eq 'restore' -and -not [IO.File]::Exists($ipsetFlagFile)) { return }
+
+    try {
+        if ($mode -eq 'any') {
+            if ([IO.File]::Exists($ipsetFlagFile)) { throw 'Previous IPSet change has not been restored.' }
+            $state = 'present'
+            try { [IO.File]::Copy($listFile, $backupFile, $true) }
+            catch [IO.FileNotFoundException] { $state = 'missing' }
+            # Publish recovery state before touching the active list.
+            [IO.File]::WriteAllText($stagedFlag, $state)
+            [IO.File]::Move($stagedFlag, $ipsetFlagFile)
+            [IO.File]::WriteAllText($stagedList, '')
         } else {
-            # If none, create empty backup
-            "" | Out-File $backupFile -Encoding UTF8
+            $state = [IO.File]::ReadAllText($ipsetFlagFile).Trim()
+            if ($state -eq 'missing') {
+                [IO.File]::Delete($listFile)
+            } elseif ($state -eq 'present' -or $state -eq '') {
+                # An empty flag is from an earlier version of the test script.
+                [IO.File]::Copy($backupFile, $stagedList, $true)
+            } else {
+                throw 'Invalid IPSet recovery flag.'
+            }
         }
-        # Make file empty
-        "" | Out-File $listFile -Encoding UTF8
-    } elseif ($mode -eq "restore") {
-        if (Test-Path $backupFile) {
-            Move-Item $backupFile $listFile -Force
+
+        if ($mode -eq 'any' -or $state -ne 'missing') {
+            if ([IO.File]::Exists($listFile)) { [IO.File]::Replace($stagedList, $listFile, [NullString]::Value) }
+            else { [IO.File]::Move($stagedList, $listFile) }
         }
+        if ($mode -eq 'restore') {
+            [IO.File]::Delete($ipsetFlagFile)
+            Remove-Item -LiteralPath $backupFile -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        Remove-Item -LiteralPath $stagedList,$stagedFlag -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -62,16 +86,6 @@ function Wait-AnyKey {
         # No interactive console (stdin redirected): ReadKey throws here
         [void](Read-Host)
     }
-}
-
-trap {
-    Write-Host "[ERROR] Script interrupted. Restoring ipset..." -ForegroundColor Red
-    if ($originalIpsetStatus -and $originalIpsetStatus -ne "any") {
-        Set-IpsetMode -mode "restore"
-    }
-    Remove-Item -Path $ipsetFlagFile -ErrorAction SilentlyContinue
-    Wait-AnyKey
-    break
 }
 
 function New-OrderedDict { New-Object System.Collections.Specialized.OrderedDictionary }
@@ -123,7 +137,7 @@ function Get-DpiSuite {
     $url = "https://hyperion-cs.github.io/dpi-checkers/ru/tcp-16-20/suite.v2.json"
 
     try {
-        (Invoke-RestMethod -Uri $url -TimeoutSec $dpiTimeoutSeconds) |
+        (Invoke-RestMethod -Uri $url -TimeoutSec $dpiTimeoutSeconds -ErrorAction Stop) |
             Select-Object `
                 @{n='Id';       e={$_.id}},
                 @{n='Provider'; e={$_.provider}},
@@ -141,13 +155,13 @@ function Build-DpiTargets {
         [string]$CustomHost
     )
 
-    $suite = Get-DpiSuite
     $targets = @()
 
     if ($CustomHost) {
         $targets += @{ Id = "CUSTOM"; Provider = "Custom"; Country = "💡"; Host = $CustomHost }
     } else {
-        foreach ($entry in $suite) {
+        foreach ($entry in (Get-DpiSuite)) {
+            if ([string]::IsNullOrWhiteSpace($entry.Host)) { continue }
             $targets += @{ Id = $entry.Id; Country = $entry.Country; Provider = $entry.Provider; Host = $entry.Host }
         }
     }
@@ -162,6 +176,11 @@ function Invoke-DpiSuite {
         [int]$RangeBytes,
         [int]$MaxParallel
     )
+
+    if (-not $Targets.Count) {
+        Write-Host "[WARN] DPI checks were not run: no targets are available." -ForegroundColor Yellow
+        return
+    }
 
     $tests = @(
         @{ Label = "HTTP";   Args = @("--http1.1") },
@@ -313,8 +332,10 @@ function Invoke-DpiSuite {
 
             if ($res.Warned) {
                 $warnDetected = $true
-            } else {
+            } elseif ($res.Lines.Status -contains 'OK') {
                 Write-Host "  No 16-20KB freeze pattern for this target." -ForegroundColor Green
+            } else {
+                Write-Host "  No usable DPI measurements for this target." -ForegroundColor Yellow
             }
         } catch {
             Write-Host "[WARN] EndInvoke failed for a runspace; treating as failure." -ForegroundColor Yellow
@@ -338,9 +359,11 @@ function Invoke-DpiSuite {
     if ($warnDetected) {
         Write-Host ""
         Write-Host "[WARNING] Detected possible DPI TCP 16-20 blocking on one or more targets. Consider changing strategy/SNI/IP." -ForegroundColor Red
-    } else {
+    } elseif ($results.Lines.Status -contains 'OK') {
         Write-Host ""
-        Write-Host "[OK] No 16-20KB freeze pattern detected across targets." -ForegroundColor Green
+        Write-Host "[OK] No 16-20KB freeze pattern detected in completed measurements." -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] No usable DPI measurements across targets." -ForegroundColor Yellow
     }
 
     return $results
@@ -368,25 +391,6 @@ if (-not (Get-Command "curl.exe" -ErrorAction SilentlyContinue)) {
     Write-Host "[OK] curl.exe found" -ForegroundColor Green
 }
 
-# Check for leftover ipset flag from previous interrupted run
-$ipsetFlagFile = Join-Path $rootDir "ipset_switched.flag"
-if (Test-Path $ipsetFlagFile) {
-    Write-Host "[INFO] Detected leftover ipset switch flag. Restoring ipset..." -ForegroundColor Yellow
-    Set-IpsetMode -mode "restore"
-    Remove-Item -Path $ipsetFlagFile -ErrorAction SilentlyContinue
-}
-
-# Get original ipset status early
-$originalIpsetStatus = Get-IpsetStatus
-
-# Warn about ipset switching and X button behavior
-if ($originalIpsetStatus -ne "any") {
-    Write-Host "[INFO] Current ipset status: $originalIpsetStatus" -ForegroundColor Cyan
-    Write-Host "[WARNING] Ipset will be switched to 'any' for accurate DPI tests." -ForegroundColor Yellow
-    Write-Host "[WARNING] If you close the window with the X button, ipset will NOT restore immediately." -ForegroundColor Yellow
-    Write-Host "[WARNING] It will be restored automatically on the next script run." -ForegroundColor Yellow
-}
-
 # Check if zapret service installed
 if (Test-ZapretServiceConflict) {
     Write-Host "[ERROR] Windows service 'zapret' is installed" -ForegroundColor Red
@@ -401,6 +405,27 @@ if ($hasErrors) {
     Wait-AnyKey -message "Press any key to exit..."
     exit 1
 }
+
+try {
+    $ipsetLock = [IO.File]::Open("$ipsetFlagFile.lock", 'OpenOrCreate', 'ReadWrite', 'None')
+} catch {
+    Write-Host "[ERROR] Could not lock the test state. Check for another running test: $_" -ForegroundColor Red
+    Wait-AnyKey
+    exit 1
+}
+
+try {
+    try {
+        if (Test-Path -LiteralPath $ipsetFlagFile) {
+            Write-Host "[INFO] Restoring IPSet after the previous test..." -ForegroundColor Yellow
+            Set-IpsetMode -mode restore
+        }
+        $originalIpsetStatus = Get-IpsetStatus
+    } catch {
+        Write-Host "[ERROR] Could not prepare the IPSet state: $_" -ForegroundColor Red
+        Wait-AnyKey
+        exit 1
+    }
 
 $dpiTargets = @()
 
@@ -528,7 +553,12 @@ if ($mode -eq 'select') {
 }
 
 if ($testType -eq 'dpi') {
-    $dpiTargets = Build-DpiTargets -CustomHost $dpiCustomHost
+    $dpiTargets = @(Build-DpiTargets -CustomHost $dpiCustomHost)
+    if (-not $dpiTargets.Count) {
+        Write-Host "[WARN] DPI checks were not run: no targets are available." -ForegroundColor Yellow
+        Wait-AnyKey
+        exit 1
+    }
 }
 
 # Load targets once for standard mode
@@ -652,13 +682,13 @@ Write-Host "                 Mode: $($testType.ToUpper())" -ForegroundColor Cyan
 Write-Host "                 Total configs: $($batFiles.Count.ToString().PadLeft(2))" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
+$testsFailed = $false
 try {
     # Save original ipset status and switch to 'any' for accurate DPI tests
     if (($originalIpsetStatus -ne "any") -and ($testType -eq 'dpi')) {
         Write-Host "[WARNING] Ipset is in '$originalIpsetStatus' mode. Switching to 'any' for accurate DPI tests..." -ForegroundColor Yellow
+        Write-Host "[WARNING] If the window is closed, IPSet will be restored on the next test run." -ForegroundColor Yellow
         Set-IpsetMode -mode "any"
-        # Create flag file to indicate ipset was switched
-        "" | Out-File -FilePath $ipsetFlagFile -Encoding UTF8
     }
     Write-Host "[WARNING] Tests may take several minutes to complete. Please wait..." -ForegroundColor Yellow
 
@@ -920,6 +950,7 @@ try {
     foreach ($config in $analytics.Keys) {
         $a = $analytics[$config]
         $score = $a.OK
+        if ($testType -eq 'dpi' -and $score -eq 0) { continue }
         $pingScore = 0
         if ($a.ContainsKey('PingOK')) {
             $pingScore = $a.PingOK
@@ -936,7 +967,12 @@ try {
         }
     }
     Write-Host ""
-    Write-Host "Best config: $bestConfig" -ForegroundColor Green
+    if ($testType -eq 'dpi' -and -not $bestConfig) {
+        $bestConfig = 'none (no successful DPI measurements)'
+        Write-Host "Best config: $bestConfig" -ForegroundColor Yellow
+    } else {
+        Write-Host "Best config: $bestConfig" -ForegroundColor Green
+    }
     Write-Host ""
 
     # Save to file
@@ -1001,21 +1037,24 @@ try {
     Write-Host "Results saved to $resultFile" -ForegroundColor Green
 
 } catch {
-    Write-Host "[ERROR] An error occurred during tests. Restoring ipset..." -ForegroundColor Red
-    if ($originalIpsetStatus -and $originalIpsetStatus -ne "any") {
-        Set-IpsetMode -mode "restore"
-    }
-    Remove-Item -Path $ipsetFlagFile -ErrorAction SilentlyContinue
+    Write-Host "[ERROR] Tests failed: $_" -ForegroundColor Red
+    $testsFailed = $true
 } finally {
-    Stop-Zapret
-    Restore-WinwsSnapshot -snapshot $originalWinws
-    if ($originalIpsetStatus -ne "any") {
-        Write-Host "[INFO] Restoring original ipset mode..." -ForegroundColor DarkGray
-        Set-IpsetMode -mode "restore"
+    try { Stop-Zapret } finally {
+        try {
+            Set-IpsetMode -mode restore
+            Restore-WinwsSnapshot -snapshot $originalWinws
+        } catch {
+            Write-Host "[ERROR] Could not restore the pre-test state: $_" -ForegroundColor Red
+            $testsFailed = $true
+        }
     }
-    Remove-Item -Path $ipsetFlagFile -ErrorAction SilentlyContinue
 }
 
     Wait-AnyKey
-    exit
+    if ($testsFailed) { exit 1 }
+    exit 0
+}
+} finally {
+    $ipsetLock.Dispose()
 }

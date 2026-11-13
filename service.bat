@@ -1,7 +1,9 @@
 @echo off
-set "LOCAL_VERSION=1.10.4"
+set "LOCAL_VERSION=1.10.5"
 
 :: External commands
+if "%~1"=="service_args" goto print_service_args
+
 if "%~1"=="status_zapret" (
     call :test_service zapret soft
     call :tcp_enable
@@ -277,6 +279,47 @@ if not defined selectedFile (
     goto menu
 )
 
+call :build_service_args
+if errorlevel 1 (
+    echo Could not read launch arguments from the selected strategy.
+    pause
+    goto menu
+)
+
+:: Creating service with parsed args
+call :tcp_enable
+
+echo Final args: !ARGS!
+set SRVCNAME=zapret
+
+net stop %SRVCNAME% >nul 2>&1
+sc delete %SRVCNAME% >nul 2>&1
+sc create %SRVCNAME% binPath= "\"%BIN_PATH%winws.exe\" --zapret-service !ARGS!" DisplayName= "zapret" start= auto
+if errorlevel 1 (
+    pause
+    goto menu
+)
+sc description %SRVCNAME% "Zapret DPI bypass software"
+sc start %SRVCNAME%
+for %%F in ("!selectedFile!") do (
+    set "filename=%%~nF"
+)
+reg add "HKLM\System\CurrentControlSet\Services\zapret" /v zapret-discord-youtube /t REG_SZ /d "!filename!" /f
+
+pause
+goto menu
+
+:print_service_args
+setlocal EnableDelayedExpansion
+cd /d "%~dp0"
+set "selectedFile=%~2"
+call :game_switch_status
+call :build_service_args
+if errorlevel 1 exit /b 1
+echo(!ARGS!
+exit /b 0
+
+:build_service_args
 :: Args that should be followed by value
 set "args_with_value=sni host altorder"
 
@@ -354,30 +397,10 @@ for /f "tokens=*" %%a in ('type "!selectedFile!"') do (
     )
 )
 
-:: Creating service with parsed args
-call :tcp_enable
-
+if not defined args exit /b 1
 set ARGS=%args%
 call set "ARGS=%%ARGS:EXCL_MARK=^!%%"
-echo Final args: !ARGS!
-set SRVCNAME=zapret
-
-net stop %SRVCNAME% >nul 2>&1
-sc delete %SRVCNAME% >nul 2>&1
-sc create %SRVCNAME% binPath= "\"%BIN_PATH%winws.exe\" --zapret-service !ARGS!" DisplayName= "zapret" start= auto
-if errorlevel 1 (
-    pause
-    goto menu
-)
-sc description %SRVCNAME% "Zapret DPI bypass software"
-sc start %SRVCNAME%
-for %%F in ("!file%choice%!") do (
-    set "filename=%%~nF"
-)
-reg add "HKLM\System\CurrentControlSet\Services\zapret" /v zapret-discord-youtube /t REG_SZ /d "!filename!" /f
-
-pause
-goto menu
+exit /b 0
 
 
 :: CHECK UPDATES =======================
@@ -386,9 +409,9 @@ chcp 437 > nul
 cls
 
 :: Set current version and URLs
-set "GITHUB_VERSION_URL=https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/version.txt"
-set "GITHUB_RELEASE_URL=https://github.com/Flowseal/zapret-discord-youtube/releases/tag/"
-set "GITHUB_DOWNLOAD_URL=https://github.com/Flowseal/zapret-discord-youtube/releases/latest"
+set "GITHUB_VERSION_URL=https://raw.githubusercontent.com/BIOhazzardMTV/zapret-discord-youtube/main/.service/version.txt"
+set "GITHUB_RELEASE_URL=https://github.com/BIOhazzardMTV/zapret-discord-youtube/releases/tag/"
+set "GITHUB_DOWNLOAD_URL=https://github.com/BIOhazzardMTV/zapret-discord-youtube/releases/latest"
 
 :: Get the latest version from GitHub
 for /f "delims=" %%A in ('powershell -NoProfile -Command "(Invoke-WebRequest -Uri \"%GITHUB_VERSION_URL%\" -Headers @{\"Cache-Control\"=\"no-cache\"} -UseBasicParsing -TimeoutSec 5).Content.Trim()" 2^>nul') do set "GITHUB_VERSION=%%A"
@@ -829,18 +852,17 @@ if "%GameFilterChoice%"=="1" (
 ) else if "%GameFilterChoice%"=="4" (
     set "GameFilterMode=udp"
 ) else if "%GameFilterChoice%"=="5" (
-    call :change_game_filter_range tcp
+    call :change_game_filter_range tcp || goto game_switch
 ) else if "%GameFilterChoice%"=="6" (
-    call :change_game_filter_range udp
+    call :change_game_filter_range udp || goto game_switch
 ) else if "%GameFilterChoice%"=="7" (
-    call :change_game_filter_range all
+    call :change_game_filter_range all || goto game_switch
 ) else (
     goto menu
 )
 
 echo.
-call :save_game_filter_settings
-call :PrintYellow "Restart the zapret to apply the changes"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0utils\service-files.ps1" SaveGameFilter
 pause
 goto game_switch
 
@@ -855,7 +877,7 @@ call :validate_game_filter_range "%GameFilterRangeInput%"
 if not defined ValidatedGameFilterRange (
     call :PrintRed "Invalid input. Please enter valid ports/ranges."
     pause
-    goto game_switch
+    exit /b 1
 )
 
 if /i "%~1"=="tcp" set "GameFilterTCPRange=%ValidatedGameFilterRange%"
@@ -864,7 +886,7 @@ if /i "%~1"=="all" (
     set "GameFilterTCPRange=%ValidatedGameFilterRange%"
     set "GameFilterUDPRange=%ValidatedGameFilterRange%"
 )
-exit /b
+exit /b 0
 
 
 :validate_game_filter_range
@@ -901,15 +923,6 @@ if !GameFilterRangeEndNumber! gtr 65535 exit /b
 if !GameFilterRangeStartNumber! gtr !GameFilterRangeEndNumber! exit /b
 
 endlocal & set "GameFilterRangeItemValid=1"
-exit /b
-
-
-:save_game_filter_settings
->"%gameFlagFile%" (
-    echo mode=%GameFilterMode%
-    echo tcp=%GameFilterTCPRange%
-    echo udp=%GameFilterUDPRange%
-)
 exit /b
 
 
@@ -1040,8 +1053,7 @@ if not defined source_file (
     goto replace_active_fakes_prompt
 )
 
-del /f /q "!active_file!" >nul 2>&1
-copy /y "!source_file!" "!active_file!" >nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0utils\service-files.ps1" ReplaceActiveFile
 if errorlevel 1 (
     echo Failed to replace the active fake file.
 ) else (
@@ -1061,17 +1073,18 @@ goto replace_active_fakes_prompt
 chcp 437 > nul
 
 set "listFile=%~dp0lists\ipset-all.txt"
+set "lineCount=0"
 for /f %%i in ('type "%listFile%" 2^>nul ^| find /c /v ""') do set "lineCount=%%i"
 
-if !lineCount!==0 (
+if "!lineCount!"=="0" (
     set "IPsetStatus=any"
 ) else (
-    findstr /C:"203.0.113.113/32" "%listFile%" >nul
-    if !errorlevel!==0 (
+    findstr /L /X /C:"203.0.113.113/32" "%listFile%" >nul
+    if "!lineCount!"=="1" if !errorlevel!==0 (
         set "IPsetStatus=none"
-    ) else (
-        set "IPsetStatus=loaded"
+        exit /b
     )
+    set "IPsetStatus=loaded"
 )
 exit /b
 
@@ -1080,43 +1093,7 @@ exit /b
 chcp 437 > nul
 cls
 
-set "listFile=%~dp0lists\ipset-all.txt"
-set "backupFile=%listFile%.backup"
-
-if "%IPsetStatus%"=="loaded" (
-    echo Switching to none mode...
-    
-    if not exist "%backupFile%" (
-        ren "%listFile%" "ipset-all.txt.backup"
-    ) else (
-        del /f /q "%backupFile%"
-        ren "%listFile%" "ipset-all.txt.backup"
-    )
-    
-    >"%listFile%" (
-        echo 203.0.113.113/32
-    )
-    
-) else if "%IPsetStatus%"=="none" (
-    echo Switching to any mode...
-    
-    >"%listFile%" (
-        rem Creating empty file
-    )
-    
-) else if "%IPsetStatus%"=="any" (
-    echo Switching to loaded mode...
-    
-    if exist "%backupFile%" (
-        del /f /q "%listFile%"
-        ren "%backupFile%" "ipset-all.txt"
-    ) else (
-        echo Error: no backup to restore. Update list from service menu first
-        pause
-        goto menu
-    )
-    
-)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0utils\service-files.ps1" SwitchIpset
 
 pause
 goto menu
@@ -1127,29 +1104,8 @@ goto menu
 chcp 437 > nul
 cls
 
-set "listFile=%~dp0lists\ipset-all.txt"
-set "url=https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/ipset-service.txt"
-
 echo Updating ipset-all...
-
-if exist "%SystemRoot%\System32\curl.exe" (
-    curl --version | find "libcurl/7"
-    if !errorlevel!==0 (
-        curl --ssl-no-revoke -L -f -o "%listFile%" "%url%"
-    ) else (
-        curl --ssl-revoke-best-effort -L -f -o "%listFile%" "%url%"
-    )
-) else (
-    powershell -NoProfile -Command ^
-        "$url = '%url%';" ^
-        "$out = '%listFile%';" ^
-        "$dir = Split-Path -Parent $out;" ^
-        "if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null };" ^
-        "$res = Invoke-WebRequest -Uri $url -TimeoutSec 10 -UseBasicParsing;" ^
-        "if ($res.StatusCode -eq 200) { $res.Content | Out-File -FilePath $out -Encoding UTF8 } else { exit 1 }"
-)
-
-echo Finished
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0utils\service-files.ps1" UpdateIpset
 
 pause
 goto menu
@@ -1160,63 +1116,10 @@ goto menu
 chcp 437 > nul
 cls
 
-set "hostsFile=%SystemRoot%\System32\drivers\etc\hosts"
-set "hostsUrl=https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts"
-set "tempFile=%TEMP%\zapret_hosts.txt"
-set "needsUpdate=0"
-
-set "cacheBuster=%RANDOM%%RANDOM%%RANDOM%"
-set "requestUrl=%hostsUrl%?t=%cacheBuster%"
-
 echo Checking hosts file...
-
-if exist "%SystemRoot%\System32\curl.exe" (
-    curl -L -s -f -o "%tempFile%" "%requestUrl%"
-) else (
-    powershell -NoProfile -Command ^
-        "$url = '%requestUrl%';" ^
-        "$out = '%tempFile%';" ^
-        "$res = Invoke-WebRequest -Uri $url -TimeoutSec 10 -UseBasicParsing;" ^
-        "if ($res.StatusCode -eq 200) { $res.Content | Out-File -FilePath $out -Encoding UTF8 } else { exit 1 }"
-)
-if not exist "%tempFile%" (
-    call :PrintRed "Failed to download hosts file from repository"
-    call :PrintYellow "Copy hosts file manually from %hostsUrl%"
-    pause
-    goto menu
-)
-
-set "firstLine="
-set "lastLine="
-for /f "usebackq delims=" %%a in ("%tempFile%") do (
-    if not defined firstLine (
-        set "firstLine=%%a"
-    )
-    set "lastLine=%%a"
-)
-
-findstr /C:"!firstLine!" "%hostsFile%" >nul 2>&1
-if !errorlevel! neq 0 (
-    echo First line from repository not found in hosts file
-    set "needsUpdate=1"
-)
-
-findstr /C:"!lastLine!" "%hostsFile%" >nul 2>&1
-if !errorlevel! neq 0 (
-    echo Last line from repository not found in hosts file
-    set "needsUpdate=1"
-)
-
-if "%needsUpdate%"=="1" (
-    echo:
-    call :PrintYellow "Hosts file needs to be updated"
-    call :PrintYellow "Please manually copy the content from the downloaded file to your hosts file"
-    
-    start notepad "%tempFile%"
-    explorer /select,"%hostsFile%"
-) else (
-    call :PrintGreen "Hosts file is up to date"
-    if exist "%tempFile%" del /f /q "%tempFile%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0utils\service-files.ps1" UpdateHosts
+if errorlevel 1 (
+    call :PrintYellow "Copy hosts entries manually from https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/.service/hosts"
 )
 
 echo:
