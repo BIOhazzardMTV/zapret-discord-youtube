@@ -1,20 +1,117 @@
 name: Release
 
 on:
+  schedule:
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag'
-        required: true
+        description: 'Release tag (leave empty to sync the latest Flowseal release)'
+        required: false
+
+concurrency: release
+
+permissions:
+  contents: read
 
 jobs:
+  prepare:
+    if: inputs.tag != '' || github.repository == 'BIOhazzardMTV/zapret-discord-youtube'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.prepare.outputs.tag }}
+      commit: ${{ steps.prepare.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag && github.sha || 'main' }}
+          fetch-depth: 0
+          token: ${{ !inputs.tag && secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+
+      - name: Prepare release
+        id: prepare
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          version_file=.service/version.txt
+          if [[ -z "$TAG" ]]; then
+            upstream=Flowseal/zapret-discord-youtube
+            release=$(gh api "repos/$upstream/releases/latest" --jq '[.tag_name, .published_at] | @tsv')
+            read -r version published_at <<< "$release"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+[a-z]?$ || -z "$published_at" ]]; then
+              echo "::error::Unable to read the Flowseal release version and publication date"
+              exit 1
+            fi
+
+            # 1.10.4 was already integrated before the fork's own 1.10.5 release.
+            if [[ ! "$published_at" > '2026-10-20T04:44:59Z' ]]; then
+              echo "No new Flowseal release ($version)."
+              exit 0
+            fi
+
+            TAG="$version-custom"
+            released=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" \
+              --jq '.[] | select(.draft == false) | .tag_name')
+            if grep -Fxq -- "$TAG" <<< "$released"; then
+              echo "$TAG is already published."
+              exit 0
+            fi
+
+            git fetch --no-tags "https://github.com/$upstream.git" \
+              'refs/heads/main:refs/remotes/flowseal/main' "refs/tags/$version:refs/flowseal/release"
+            if ! git merge-base --is-ancestor refs/flowseal/release refs/remotes/flowseal/main; then
+              echo "::error::Flowseal release $version is outside upstream main"
+              exit 1
+            fi
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            if ! git merge --no-ff --no-commit refs/flowseal/release; then
+              if [[ "$(git diff --name-only --diff-filter=U)" != "$version_file" ||
+                    "$(git status --porcelain -- "$version_file")" != "UU $version_file" ]]; then
+                echo "::error::Resolve the merge with Flowseal $version on main and rerun this workflow"
+                exit 1
+              fi
+            fi
+
+            printf '%s\n' "$TAG" > "$version_file"
+            git add -- "$version_file"
+            if git rev-parse --quiet --verify MERGE_HEAD >/dev/null || ! git diff --cached --quiet; then
+              git commit -m "Sync Flowseal $version and prepare $TAG"
+            fi
+          fi
+
+          if [[ ! "$TAG" =~ ^[0-9][0-9A-Za-z.-]*$ ]] ||
+             [[ "$(cat "$version_file")" != "$TAG" ]]; then
+            echo "::error::Release tag must match $version_file"
+            exit 1
+          fi
+          git check-ref-format "refs/tags/$TAG"
+          commit=$(git rev-parse HEAD)
+          existing=$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
+          if [[ -n "$existing" && "${existing##*$'\n'}" != "$commit"$'\t'* ]]; then
+            echo "::error::Release tag $TAG already points to another commit"
+            exit 1
+          fi
+          if [[ -n "${version:-}" ]]; then
+            git push origin HEAD:refs/heads/main
+          fi
+          printf 'tag=%s\ncommit=%s\n' "$TAG" "$commit" >> "$GITHUB_OUTPUT"
+
   build-launcher:
+    needs: prepare
+    if: needs.prepare.outputs.tag != ''
     runs-on: windows-2022
     permissions:
       contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
 
       - name: Build launcher
         shell: powershell
@@ -34,22 +131,18 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build-launcher
+    needs: [prepare, build-launcher]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Verify version matches version.txt
-        run: |
-          VERSION=$(cat .service/version.txt)
-          if [ "$VERSION" != "${{ github.event.inputs.tag }}" ]; then
-            echo "Error: tag '${{ github.event.inputs.tag }}' does not match .service/version.txt ('$VERSION')"
-            exit 1
-          fi
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
 
       - name: Download tested launcher
         uses: actions/download-artifact@v8
@@ -64,9 +157,10 @@ jobs:
 
       - name: Prepare release bundle
         run: |
-          NAME="zapret-discord-youtube-${{ github.event.inputs.tag }}"
+          NAME="zapret-discord-youtube-$TAG"
 
-          mkdir "$NAME"
+          mkdir -p "$NAME/.service"
+          cp .service/version.txt "$NAME/.service/"
 
           cp -r bin "$NAME/"
           cp release-launcher/winws.exe "$NAME/bin/winws.exe"
@@ -77,7 +171,7 @@ jobs:
 
       - name: Create archives
         run: |
-          NAME="zapret-discord-youtube-${{ github.event.inputs.tag }}"
+          NAME="zapret-discord-youtube-$TAG"
 
           zip -qr "${NAME}.zip" "$NAME"
           rar a -idq "${NAME}.rar" "$NAME"
@@ -85,7 +179,7 @@ jobs:
 
       - name: Generate SHA256 checksums
         run: |
-          NAME="zapret-discord-youtube-${{ github.event.inputs.tag }}"
+          NAME="zapret-discord-youtube-$TAG"
 
           sha256sum \
             "${NAME}.zip" \
@@ -96,11 +190,13 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event.inputs.tag }}
-          name: ${{ github.event.inputs.tag }}
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          target_commitish: ${{ needs.prepare.outputs.commit }}
+          make_latest: ${{ !inputs.tag && 'true' || '' }}
           fail_on_unmatched_files: true
           files: |
-            zapret-discord-youtube-${{ github.event.inputs.tag }}.zip
-            zapret-discord-youtube-${{ github.event.inputs.tag }}.rar
-            zapret-discord-youtube-${{ github.event.inputs.tag }}.tar.gz
-            zapret-discord-youtube-${{ github.event.inputs.tag }}-SHA256SUMS.txt
+            zapret-discord-youtube-${{ env.TAG }}.zip
+            zapret-discord-youtube-${{ env.TAG }}.rar
+            zapret-discord-youtube-${{ env.TAG }}.tar.gz
+            zapret-discord-youtube-${{ env.TAG }}-SHA256SUMS.txt

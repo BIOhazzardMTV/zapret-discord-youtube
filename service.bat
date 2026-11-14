@@ -1,5 +1,7 @@
 @echo off
-set "LOCAL_VERSION=1.10.5"
+set "LOCAL_VERSION=1.10.4"
+
+if exist "%~dp0.service\version.txt" set /p "LOCAL_VERSION="<"%~dp0.service\version.txt"
 
 :: External commands
 if "%~1"=="service_args" goto print_service_args
@@ -409,12 +411,13 @@ chcp 437 > nul
 cls
 
 :: Set current version and URLs
-set "GITHUB_VERSION_URL=https://raw.githubusercontent.com/BIOhazzardMTV/zapret-discord-youtube/main/.service/version.txt"
+set "GITHUB_VERSION_URL=https://api.github.com/repos/BIOhazzardMTV/zapret-discord-youtube/releases/latest"
 set "GITHUB_RELEASE_URL=https://github.com/BIOhazzardMTV/zapret-discord-youtube/releases/tag/"
 set "GITHUB_DOWNLOAD_URL=https://github.com/BIOhazzardMTV/zapret-discord-youtube/releases/latest"
 
 :: Get the latest version from GitHub
-for /f "delims=" %%A in ('powershell -NoProfile -Command "(Invoke-WebRequest -Uri \"%GITHUB_VERSION_URL%\" -Headers @{\"Cache-Control\"=\"no-cache\"} -UseBasicParsing -TimeoutSec 5).Content.Trim()" 2^>nul') do set "GITHUB_VERSION=%%A"
+set "GITHUB_VERSION="
+for /f "delims=" %%A in ('powershell -NoProfile -Command "$tag=(Invoke-RestMethod -Uri $env:GITHUB_VERSION_URL -TimeoutSec 5).tag_name; if ($tag -cmatch '^[0-9][0-9A-Za-z.-]*$') { $tag }" 2^>nul') do set "GITHUB_VERSION=%%A"
 
 :: Error handling
 if not defined GITHUB_VERSION (
