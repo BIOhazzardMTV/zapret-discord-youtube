@@ -2,7 +2,7 @@ name: Release
 
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '42 * * * *'
   workflow_dispatch:
     inputs:
       tag:
