@@ -2,7 +2,8 @@ name: Release
 
 on:
   schedule:
-    - cron: '42 * * * *'
+    # shortcut: GitHub can drop schedule events, use an external scheduler if hourly delivery is required.
+    - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
     inputs:
       tag:
