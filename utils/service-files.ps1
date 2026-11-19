@@ -218,7 +218,13 @@ if ($Action -in 'SwitchIpset', 'UpdateIpset') {
                 $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
                 if (Test-Path -LiteralPath $curl) {
                     $tlsOption = if ((& $curl --version) -match 'libcurl/7') { '--ssl-no-revoke' } else { '--ssl-revoke-best-effort' }
-                    & $curl $tlsOption -L -f --max-time 30 -o $staged $url
+                    $curlOptions = @($tlsOption, '-L', '-f', '--max-time', '30', '-o', $staged)
+                    & $curl @curlOptions $url
+                    if ($LASTEXITCODE -in 18, 28) {
+                        Write-Warning "IPSet download interrupted (curl exit code $LASTEXITCODE). Retrying via the GitHub API."
+                        $apiUrl = 'https://api.github.com/repos/Flowseal/zapret-discord-youtube/contents/.service/ipset-service.txt?ref=main'
+                        & $curl @curlOptions -H 'Accept: application/vnd.github.raw+json' $apiUrl
+                    }
                     if ($LASTEXITCODE -ne 0) { throw "IPSet download failed (curl exit code $LASTEXITCODE)." }
                 } else {
                     Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Uri $url -OutFile $staged
